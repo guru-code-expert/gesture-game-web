@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture Controlled 2D Game</title>
+    <style>
+        body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #000; color: #fff; font-family: Arial; }
+        #container { display: flex; }
+        #gameCanvas { border: 1px solid #fff; }
+        #videoCanvas { border: 1px solid #fff; margin-left: 20px; }
+        #score { position: absolute; top: 10px; left: 10px; }
+        #gameOver { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; display: none; }
+        #restartBtn { padding: 10px 20px; background: blue; color: white; border: none; cursor: pointer; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div id="container">
+        <canvas id="gameCanvas" width="400" height="600"></canvas>
+        <canvas id="videoCanvas" width="400" height="300"></canvas>
+    </div>
+    <div id="score">Score: 0</div>
+    <div id="gameOver">
+        <h1>Game Over</h1>
+        <button id="restartBtn">Restart</button>
+    </div>
+
+    <script>
+        const videoElement = document.createElement('video');
+        videoElement.style.display = 'none';
+        document.body.appendChild(videoElement);
+
+        const gameCanvas = document.getElementById('gameCanvas');
+        const gameCtx = gameCanvas.getContext('2d');
+        const videoCanvas = document.getElementById('videoCanvas');
+        const videoCtx = videoCanvas.getContext('2d');
+        const scoreElement = document.getElementById('score');
+        const gameOverElement = document.getElementById('gameOver');
+        const restartBtn = document.getElementById('restartBtn');
+
+        // Game variables
+        let playerX = 175, playerY = 550, playerVelY = 0, gravity = 0.5, jumpHeight = -15, onGround = true;
+        const playerWidth = 50, playerHeight = 50, playerSpeed = 5;
+        let obstacles = [];
+        let score = 0, gameOver = false;
+        let lastObstacleTime = 0;
+
+        // MediaPipe Hands setup (latest via CDN)
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.7,
+            minTrackingConfidence: 0.7
+        });
+        hands.onResults(onResults);
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        camera.start();
+
+        // Gesture processing
+        function onResults(results) {
+            // Draw video and landmarks on videoCanvas
+            videoCtx.save();
+            videoCtx.clearRect(0, 0, videoCanvas.width, videoCanvas.height);
+            videoCtx.drawImage(results.image, 0, 0, videoCanvas.width, videoCanvas.height);
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(videoCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 5});
+                    drawLandmarks(videoCtx, landmarks, {color: '#FF0000', lineWidth: 2});
+                }
+                const landmarks = results.multiHandLandmarks[0];
+                const handedness = results.multiHandedness[0].label;
+                const numFingers = countOpenFingers(landmarks, handedness);
+                videoCtx.font = '30px Arial';
+                videoCtx.fillStyle = 'red';
+                videoCtx.fillText(`Fingers: ${numFingers}`, 10, 50);
+
+                if (!gameOver) {
+                    if (numFingers === 1) playerX -= playerSpeed; // Left
+                    else if (numFingers === 2) playerX += playerSpeed; // Right
+                    else if (numFingers === 5 && onGround) { playerVelY = jumpHeight; onGround = false; } // Jump
+                    // 0: Stop (implicit)
+                }
+            }
+            videoCtx.restore();
+        }
+
+        // Fixed finger counting with handedness
+        function countOpenFingers(landmarks, handedness) {
+            let numFingers = 0;
+            // Thumb: adjust based on handedness (flipped video)
+            const thumbOpen = handedness === 'Left' 
+                ? landmarks[4].x > landmarks[3].x 
+                : landmarks[4].x < landmarks[3].x;
+            if (thumbOpen) numFingers++;
+            // Index
+            if (landmarks[8].y < landmarks[6].y) numFingers++;
+            // Middle
+            if (landmarks[12].y < landmarks[10].y) numFingers++;
+            // Ring
+            if (landmarks[16].y < landmarks[14].y) numFingers++;
+            // Pinky
+            if (landmarks[20].y < landmarks[18].y) numFingers++;
+            return numFingers;
+        }
+
+        // Game loop
+        function gameLoop() {
+            if (gameOver) return;
+
+            // Update score
+            score += 1;
+            scoreElement.textContent = `Score: ${Math.floor(score / 60)}`; // ~seconds
+
+            // Generate obstacles
+            if (Date.now() - lastObstacleTime > 1000) {
+                obstacles.push({x: Math.random() * (gameCanvas.width - 50), y: 0});
+                lastObstacleTime = Date.now();
+            }
+
+            // Update obstacles
+            obstacles = obstacles.filter(obs => {
+                obs.y += 5;
+                return obs.y < gameCanvas.height;
+            });
+
+            // Player physics
+            playerVelY += gravity;
+            playerY += playerVelY;
+            if (playerY >= gameCanvas.height - playerHeight) {
+                playerY = gameCanvas.height - playerHeight;
+                playerVelY = 0;
+                onGround = true;
+            }
+            playerX = Math.max(0, Math.min(playerX, gameCanvas.width - playerWidth));
+
+            // Collision check
+            for (const obs of obstacles) {
+                if (playerX < obs.x + 50 && playerX + playerWidth > obs.x && 
+                    playerY < obs.y + 50 && playerY + playerHeight > obs.y) {
+                    gameOver = true;
+                    gameOverElement.style.display = 'block';
+                    break;
+                }
+            }
+
+            // Render
+            gameCtx.fillStyle = '#000';
+            gameCtx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+            gameCtx.fillStyle = '#0F0';
+            gameCtx.fillRect(playerX, playerY, playerWidth, playerHeight);
+            gameCtx.fillStyle = '#F00';
+            obstacles.forEach(obs => gameCtx.fillRect(obs.x, obs.y, 50, 50));
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Restart
+        restartBtn.addEventListener('click', () => {
+            gameOver = false;
+            playerX = 175;
+            playerY = 550;
+            playerVelY = 0;
+            obstacles = [];
+            score = 0;
+            lastObstacleTime = 0;
+            gameOverElement.style.display = 'none';
+            gameLoop();
+        });
+
+        gameLoop();
+    </script>
+</body>
+</html>
